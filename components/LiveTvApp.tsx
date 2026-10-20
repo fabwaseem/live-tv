@@ -348,7 +348,14 @@ export default function LiveTvApp() {
               <path d="M8 5.14v13.72c0 .8.87 1.3 1.56.88l10.5-6.86a1.03 1.03 0 0 0 0-1.76L9.56 4.26A1.03 1.03 0 0 0 8 5.14z" />
             </svg>
           </span>
-          <h1 className="text-xl font-bold leading-tight tracking-tight">Live TV</h1>
+          {/* Exactly one <h1> per page: the desktop rail owns it; the drawer
+              copy renders the same text as a <p> so the DOM never carries
+              two h1s when both shells are mounted. */}
+          {inDrawer ? (
+            <p className="text-xl font-bold leading-tight tracking-tight">Live TV</p>
+          ) : (
+            <h1 className="text-xl font-bold leading-tight tracking-tight">Live TV</h1>
+          )}
           {inDrawer && (
             <button
               type="button"
