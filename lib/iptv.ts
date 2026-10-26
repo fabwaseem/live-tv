@@ -15,8 +15,13 @@
  * Regional source (round 3): Alplox/json-teles per-country M3U files — a
  * maintained, community-curated directory of Latin American / Spanish and
  * other local channels, merged per country file so the country is exact.
- * Entries whose URL carries a token parameter are dropped from every
- * community source.
+ * LG Channels source (round 4): the Apsattv community mirror of LG
+ * Channels lineups (one multi-region M3U, mostly Amagi play-out URLs).
+ * Entries carry no tvg-id, group-title or logo, so the region comes from
+ * the trailing "(XX)" name suffix (or the lg-xx / -xx.lg.wurl.tv hostname
+ * segment) and the category from the name-keyword rules; names are shown
+ * without their region/Geo suffixes. Entries whose URL carries a token
+ * parameter are dropped from every community source.
  *
  * The joined payload is built once and memoized in module scope for
  * REVALIDATE_SECONDS; upstream files are several MB each, so nothing here
@@ -49,7 +54,7 @@ export interface CountrySummary {
 export interface WorldPayload {
   streams: ChannelStream[];
   totals: { streams: number; channels: number; countries: number };
-  sources: { iptvOrg: number; freeTv: number; fast: number; alplox: number };
+  sources: { iptvOrg: number; freeTv: number; fast: number; alplox: number; lg: number };
   countries: CountrySummary[];
   generatedAt: string;
 }
@@ -106,6 +111,8 @@ const FAST_URLS = {
   roku: `${FAST_BASE}/roku_all.m3u`,
   tubi: `${FAST_BASE}/tubi_all.m3u`,
 } as const;
+/* LG Channels mirror (Apsattv): one multi-region M3U, no tvg metadata. */
+const LG_URL = "https://www.apsattv.com/lg.m3u";
 /* Alplox/json-teles per-country files; the filename IS the country code
    ("gb-eng" is the English GB file and files under GB). */
 const ALPLOX_COUNTRIES = [
@@ -270,7 +277,7 @@ function isCleanUrl(url: string): boolean {
 async function buildPayload(): Promise<WorldPayload> {
   const [
     streamsRaw, channelsRaw, categoriesRaw, countriesRaw, logosRaw, freeTvText,
-    samsungText, plutoText, rokuText, tubiText, alploxTexts,
+    samsungText, plutoText, rokuText, tubiText, lgText, alploxTexts,
   ] =
     await Promise.all([
       fetchJson<RawStream[]>(`${API}/streams.json`),
@@ -284,6 +291,7 @@ async function buildPayload(): Promise<WorldPayload> {
       fetchText(FAST_URLS.pluto).catch(() => null),
       fetchText(FAST_URLS.roku).catch(() => null),
       fetchText(FAST_URLS.tubi).catch(() => null),
+      fetchText(LG_URL).catch(() => null),
       Promise.all(ALPLOX_COUNTRIES.map((c) => fetchText(alploxUrl(c)).catch(() => null))),
     ]);
 
@@ -441,6 +449,50 @@ async function buildPayload(): Promise<WorldPayload> {
     }
   }
 
+  /* ---- LG Channels: Apsattv multi-region mirror ----
+     No tvg-id/group-title/logo on entries. Region comes from the trailing
+     "(XX)" name suffix (allowing a trailing " Geo"/" alt"), else the lg-xx
+     or -xx.lg.wurl.tv hostname segment; "UK" normalizes to GB and anything
+     outside the backbone's country map falls back to Unknown. Display names
+     drop the region/Geo suffixes; categories come from the name-keyword
+     rules, exactly like the Samsung/Pluto FAST path. */
+  let lgCount = 0;
+  if (lgText) {
+    for (const entry of parseM3u(lgText)) {
+      const url = entry.url.trim();
+      if (!url || seenUrls.has(url) || !isCleanUrl(url)) continue;
+      seenUrls.add(url);
+
+      const rawName = entry.name.trim();
+      const suffix = rawName.match(/\(([A-Z]{2})\)(?:\s+(?:Geo|alt))?\s*$/i);
+      const hostRegion =
+        url.match(/-lg-([a-z]{2})-/)?.[1] ??
+        url.match(/-([a-z]{2})\.lg\.wurl\.tv/)?.[1];
+      let code = (suffix?.[1] ?? hostRegion ?? "").toUpperCase();
+      if (code === "UK") code = "GB";
+      const country = countryInfo.has(code) ? code : UNKNOWN;
+      const name =
+        rawName
+          .replace(/\s*\([A-Z]{2}\)(?:\s+(?:Geo|alt))?\s*$/i, "")
+          .replace(/\s+Geo$/i, "")
+          .trim() || "Unknown channel";
+
+      const stream: ChannelStream = {
+        name,
+        logo: entry.attrs["tvg-logo"] ? entry.attrs["tvg-logo"] : null,
+        country,
+        countryName: countryInfo.get(country)?.name ?? "Unknown",
+        categories: [mappedCategory("", name)],
+        url,
+        channelId: `lg-${hashString(url)}`,
+      };
+      if (entry.ua) stream.ua = entry.ua;
+      if (entry.ref) stream.ref = entry.ref;
+      out.push(stream);
+      lgCount++;
+    }
+  }
+
   /* ---- regional source: Alplox/json-teles per-country files ----
      The filename is the country; group-titles are iptv-org category ids, so
      the backbone's own id→name map labels them. Display names carry a
@@ -508,7 +560,7 @@ async function buildPayload(): Promise<WorldPayload> {
       channels: new Set(out.map((s) => s.channelId)).size,
       countries: [...counts.keys()].filter((c) => c !== UNKNOWN).length,
     },
-    sources: { iptvOrg: iptvOrgCount, freeTv: freeTvCount, fast: fastCount, alplox: alploxCount },
+    sources: { iptvOrg: iptvOrgCount, freeTv: freeTvCount, fast: fastCount, alplox: alploxCount, lg: lgCount },
     countries,
     generatedAt: new Date().toISOString(),
   };
