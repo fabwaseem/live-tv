@@ -22,6 +22,12 @@
  * segment) and the category from the name-keyword rules; names are shown
  * without their region/Geo suffixes. Entries whose URL carries a token
  * parameter are dropped from every community source.
+ * LG Channels US lineup (round 5): the Apsattv US-only LG file
+ * (uslg.m3u) — the multi-region mirror does not carry the full US
+ * lineup, and this file adds its missing US streams (logos included).
+ * Names carry leading channel numbers and a trailing " US", both
+ * stripped for display; the country is US from the file context and the
+ * category comes from the name-keyword rules, exactly like round 4.
  *
  * The joined payload is built once and memoized in module scope for
  * REVALIDATE_SECONDS; upstream files are several MB each, so nothing here
@@ -54,7 +60,7 @@ export interface CountrySummary {
 export interface WorldPayload {
   streams: ChannelStream[];
   totals: { streams: number; channels: number; countries: number };
-  sources: { iptvOrg: number; freeTv: number; fast: number; alplox: number; lg: number };
+  sources: { iptvOrg: number; freeTv: number; fast: number; alplox: number; lg: number; uslg: number };
   countries: CountrySummary[];
   generatedAt: string;
 }
@@ -113,6 +119,8 @@ const FAST_URLS = {
 } as const;
 /* LG Channels mirror (Apsattv): one multi-region M3U, no tvg metadata. */
 const LG_URL = "https://www.apsattv.com/lg.m3u";
+/* LG Channels US lineup (Apsattv): US-only file, logos included. */
+const USLG_URL = "https://www.apsattv.com/uslg.m3u";
 /* Alplox/json-teles per-country files; the filename IS the country code
    ("gb-eng" is the English GB file and files under GB). */
 const ALPLOX_COUNTRIES = [
@@ -277,7 +285,7 @@ function isCleanUrl(url: string): boolean {
 async function buildPayload(): Promise<WorldPayload> {
   const [
     streamsRaw, channelsRaw, categoriesRaw, countriesRaw, logosRaw, freeTvText,
-    samsungText, plutoText, rokuText, tubiText, lgText, alploxTexts,
+    samsungText, plutoText, rokuText, tubiText, lgText, uslgText, alploxTexts,
   ] =
     await Promise.all([
       fetchJson<RawStream[]>(`${API}/streams.json`),
@@ -292,6 +300,7 @@ async function buildPayload(): Promise<WorldPayload> {
       fetchText(FAST_URLS.roku).catch(() => null),
       fetchText(FAST_URLS.tubi).catch(() => null),
       fetchText(LG_URL).catch(() => null),
+      fetchText(USLG_URL).catch(() => null),
       Promise.all(ALPLOX_COUNTRIES.map((c) => fetchText(alploxUrl(c)).catch(() => null))),
     ]);
 
@@ -493,6 +502,42 @@ async function buildPayload(): Promise<WorldPayload> {
     }
   }
 
+  /* ---- LG Channels US lineup: Apsattv uslg.m3u ----
+     Same merge contract as round 4 (exact-URL dedupe, earlier sources
+     win, credential-carrying URLs dropped). The file is the US lineup,
+     so the country is US; display names drop the leading channel
+     number and the trailing " US"; categories come from the
+     name-keyword rules and logos come from tvg-logo. */
+  let uslgCount = 0;
+  if (uslgText) {
+    for (const entry of parseM3u(uslgText)) {
+      const url = entry.url.trim();
+      if (!url || seenUrls.has(url) || !isCleanUrl(url)) continue;
+      seenUrls.add(url);
+
+      const name =
+        entry.name
+          .trim()
+          .replace(/^\d+\s+/, "")
+          .replace(/\s+US$/i, "")
+          .trim() || "Unknown channel";
+
+      const stream: ChannelStream = {
+        name,
+        logo: entry.attrs["tvg-logo"] ? entry.attrs["tvg-logo"] : null,
+        country: "US",
+        countryName: countryInfo.get("US")?.name ?? "Unknown",
+        categories: [mappedCategory("", name)],
+        url,
+        channelId: `uslg-${hashString(url)}`,
+      };
+      if (entry.ua) stream.ua = entry.ua;
+      if (entry.ref) stream.ref = entry.ref;
+      out.push(stream);
+      uslgCount++;
+    }
+  }
+
   /* ---- regional source: Alplox/json-teles per-country files ----
      The filename is the country; group-titles are iptv-org category ids, so
      the backbone's own id→name map labels them. Display names carry a
@@ -560,7 +605,7 @@ async function buildPayload(): Promise<WorldPayload> {
       channels: new Set(out.map((s) => s.channelId)).size,
       countries: [...counts.keys()].filter((c) => c !== UNKNOWN).length,
     },
-    sources: { iptvOrg: iptvOrgCount, freeTv: freeTvCount, fast: fastCount, alplox: alploxCount, lg: lgCount },
+    sources: { iptvOrg: iptvOrgCount, freeTv: freeTvCount, fast: fastCount, alplox: alploxCount, lg: lgCount, uslg: uslgCount },
     countries,
     generatedAt: new Date().toISOString(),
   };
