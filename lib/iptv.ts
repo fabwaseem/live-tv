@@ -28,6 +28,15 @@
  * Names carry leading channel numbers and a trailing " US", both
  * stripped for display; the country is US from the file context and the
  * category comes from the name-keyword rules, exactly like round 4.
+ * Tablo US FAST + LocalNow (round 6): two more Apsattv mirrors.
+ * tablo.m3u is the Tablo US FAST lineup (Amagi play-out URLs, no tvg
+ * metadata); names carry a trailing " fix" or "(Geo)" suffix, both
+ * stripped, country US from file context. localnow.m3u is the LocalNow
+ * US lineup (Allen Media Group) — entries carry tvg-logo, tvg-id
+ * (LN_<uuid>) and a "LocalNow🇺🇸: <Genre>" group-title whose genre
+ * feeds the category rules; country US from file context. Both follow
+ * the same merge contract (exact-URL dedupe, earlier sources win,
+ * credential-carrying URLs dropped).
  *
  * The joined payload is built once and memoized in module scope for
  * REVALIDATE_SECONDS; upstream files are several MB each, so nothing here
@@ -60,7 +69,7 @@ export interface CountrySummary {
 export interface WorldPayload {
   streams: ChannelStream[];
   totals: { streams: number; channels: number; countries: number };
-  sources: { iptvOrg: number; freeTv: number; fast: number; alplox: number; lg: number; uslg: number };
+  sources: { iptvOrg: number; freeTv: number; fast: number; alplox: number; lg: number; uslg: number; tablo: number; localnow: number };
   countries: CountrySummary[];
   generatedAt: string;
 }
@@ -121,6 +130,10 @@ const FAST_URLS = {
 const LG_URL = "https://www.apsattv.com/lg.m3u";
 /* LG Channels US lineup (Apsattv): US-only file, logos included. */
 const USLG_URL = "https://www.apsattv.com/uslg.m3u";
+/* Tablo US FAST lineup (Apsattv): Amagi play-out URLs, no tvg metadata. */
+const TABLO_URL = "https://www.apsattv.com/tablo.m3u";
+/* LocalNow US lineup (Apsattv): Allen Media Group FAST, tvg metadata included. */
+const LOCALNOW_URL = "https://www.apsattv.com/localnow.m3u";
 /* Alplox/json-teles per-country files; the filename IS the country code
    ("gb-eng" is the English GB file and files under GB). */
 const ALPLOX_COUNTRIES = [
@@ -285,7 +298,8 @@ function isCleanUrl(url: string): boolean {
 async function buildPayload(): Promise<WorldPayload> {
   const [
     streamsRaw, channelsRaw, categoriesRaw, countriesRaw, logosRaw, freeTvText,
-    samsungText, plutoText, rokuText, tubiText, lgText, uslgText, alploxTexts,
+    samsungText, plutoText, rokuText, tubiText, lgText, uslgText, tabloText,
+    localnowText, alploxTexts,
   ] =
     await Promise.all([
       fetchJson<RawStream[]>(`${API}/streams.json`),
@@ -301,6 +315,8 @@ async function buildPayload(): Promise<WorldPayload> {
       fetchText(FAST_URLS.tubi).catch(() => null),
       fetchText(LG_URL).catch(() => null),
       fetchText(USLG_URL).catch(() => null),
+      fetchText(TABLO_URL).catch(() => null),
+      fetchText(LOCALNOW_URL).catch(() => null),
       Promise.all(ALPLOX_COUNTRIES.map((c) => fetchText(alploxUrl(c)).catch(() => null))),
     ]);
 
@@ -538,6 +554,77 @@ async function buildPayload(): Promise<WorldPayload> {
     }
   }
 
+  /* ---- Tablo US FAST: Apsattv tablo.m3u ----
+     Same merge contract as rounds 4–5 (exact-URL dedupe, earlier
+     sources win, credential-carrying URLs dropped). No tvg metadata;
+     names carry a trailing " fix" or "(Geo)" suffix, both stripped for
+     display; the file is the US lineup, so the country is US and the
+     category comes from the name-keyword rules. */
+  let tabloCount = 0;
+  if (tabloText) {
+    for (const entry of parseM3u(tabloText)) {
+      const url = entry.url.trim();
+      if (!url || seenUrls.has(url) || !isCleanUrl(url)) continue;
+      seenUrls.add(url);
+
+      const name =
+        entry.name
+          .trim()
+          .replace(/\s+fix$/i, "")
+          .replace(/\s*\(Geo\)\s*$/i, "")
+          .replace(/\s+Geo$/i, "")
+          .trim() || "Unknown channel";
+
+      const stream: ChannelStream = {
+        name,
+        logo: entry.attrs["tvg-logo"] ? entry.attrs["tvg-logo"] : null,
+        country: "US",
+        countryName: countryInfo.get("US")?.name ?? "Unknown",
+        categories: [mappedCategory("", name)],
+        url,
+        channelId: `tablo-${hashString(url)}`,
+      };
+      if (entry.ua) stream.ua = entry.ua;
+      if (entry.ref) stream.ref = entry.ref;
+      out.push(stream);
+      tabloCount++;
+    }
+  }
+
+  /* ---- LocalNow US lineup: Apsattv localnow.m3u ----
+     Same merge contract (exact-URL dedupe, earlier sources win,
+     credential-carrying URLs dropped). Entries carry tvg-logo, tvg-id
+     (LN_<uuid>) and a "LocalNow🇺🇸: <Genre>" group-title; the genre
+     after the colon feeds the category rules. The file is the US
+     lineup, so the country is US. Channel ids are source-prefixed. */
+  let localnowCount = 0;
+  if (localnowText) {
+    for (const entry of parseM3u(localnowText)) {
+      const url = entry.url.trim();
+      if (!url || seenUrls.has(url) || !isCleanUrl(url)) continue;
+      seenUrls.add(url);
+
+      const group = entry.attrs["group-title"] || "";
+      const genre = group.includes(":") ? (group.split(":").pop() ?? "") : group;
+      const rawId = entry.attrs["tvg-id"] || "";
+      const name = entry.name.trim() || "Unknown channel";
+
+      const stream: ChannelStream = {
+        name,
+        logo: entry.attrs["tvg-logo"] ? entry.attrs["tvg-logo"] : null,
+        country: "US",
+        countryName: countryInfo.get("US")?.name ?? "Unknown",
+        categories: [mappedCategory(genre, name)],
+        url,
+        channelId: rawId ? `localnow-${rawId}` : `localnow-${hashString(url)}`,
+      };
+      if (entry.ua) stream.ua = entry.ua;
+      if (entry.ref) stream.ref = entry.ref;
+      out.push(stream);
+      localnowCount++;
+    }
+  }
+
   /* ---- regional source: Alplox/json-teles per-country files ----
      The filename is the country; group-titles are iptv-org category ids, so
      the backbone's own id→name map labels them. Display names carry a
@@ -605,7 +692,7 @@ async function buildPayload(): Promise<WorldPayload> {
       channels: new Set(out.map((s) => s.channelId)).size,
       countries: [...counts.keys()].filter((c) => c !== UNKNOWN).length,
     },
-    sources: { iptvOrg: iptvOrgCount, freeTv: freeTvCount, fast: fastCount, alplox: alploxCount, lg: lgCount, uslg: uslgCount },
+    sources: { iptvOrg: iptvOrgCount, freeTv: freeTvCount, fast: fastCount, alplox: alploxCount, lg: lgCount, uslg: uslgCount, tablo: tabloCount, localnow: localnowCount },
     countries,
     generatedAt: new Date().toISOString(),
   };
